@@ -541,17 +541,15 @@
       remaining = Math.max(0, remaining - leaf.bookings);
       return { key: s, label: STAGE_LABEL[s], color: stageColor[i], survivorsIn: survivorsIn, leaf: leaf, survivorsOut: remaining };
     });
-    const neverNegative = remaining;
-
-    // Lay out as 8 columns, alternating "entering this stage" / "retained after
-    // this stage's exit" for each of the 4 stages — same shape as a classic
-    // step-funnel sankey (cart -> enter -> billing -> enter -> ... -> done).
-    const nCols = steps.length * 2;
+    // 4 columns, one per stage: each node is the population entering that stage,
+    // colored by stage; a red branch peels off for the bookings whose first
+    // negative message landed there, the rest flows on into the next stage's node.
+    const nCols = steps.length;
     const W = el.clientWidth || 860;
-    const marginX = 60;
-    const colStep = (W - marginX * 2) / (nCols - 1);
+    const marginX = 70;
+    const colStep = nCols > 1 ? (W - marginX * 2) / (nCols - 1) : 0;
     const colX = []; for (let i = 0; i < nCols; i++) colX.push(marginX + i * colStep);
-    const nodeW = 16;
+    const nodeW = 18;
     const titleH = 34, trackTop = titleH + 34, trackH = 150;
     const exitY = trackTop + trackH + 40;
     const bottomLabelY = exitY + 34;
@@ -566,49 +564,41 @@
     }
 
     let flows = '', nodes = '', stageLabels = '';
-    const GREEN = 'var(--status-good)', RED = 'var(--status-critical)';
+    const RED = 'var(--status-critical)';
 
-    function greenNode(colI, value, label, sub) {
+    function stageNode(colI, value, color, label, sub) {
       const x = colX[colI], h = Math.max(value * scale, 2);
-      nodes += '<rect class="sankey-node-rect" x="' + x + '" y="' + topY + '" width="' + nodeW + '" height="' + h + '" fill="' + GREEN + '"></rect>' +
+      nodes += '<rect class="sankey-node-rect" x="' + x + '" y="' + topY + '" width="' + nodeW + '" height="' + h + '" fill="' + color + '"></rect>' +
         '<text class="sankey-node-label" x="' + (x + nodeW / 2) + '" y="' + (topY - 20) + '" text-anchor="middle">' + label + '</text>' +
         '<text class="sankey-node-sub" x="' + (x + nodeW / 2) + '" y="' + (topY - 8) + '" text-anchor="middle">' + sub + '</text>';
       return { x: x, h: h };
     }
 
-    // col 0: population entering the first stage
-    let prev = greenNode(0, baseBookings, STAGE_LABEL[stages[0]], pct(baseBookings, baseBookings).toFixed(0) + '% (' + baseBookings.toLocaleString() + ')');
-
+    let prev = null;
     steps.forEach(function (step, i) {
-      const enterCol = i * 2, retainCol = i * 2 + 1;
-      const retainLabel = i < steps.length - 1 ? 'Retained' : 'Done (never negative)';
-      const retained = greenNode(retainCol, step.survivorsOut, retainLabel, pct(step.survivorsOut, baseBookings).toFixed(0) + '% (' + step.survivorsOut.toLocaleString() + ')');
+      const node = stageNode(i, step.survivorsIn, step.color, STAGE_LABEL[step.key], pct(step.survivorsIn, baseBookings).toFixed(0) + '% (' + step.survivorsIn.toLocaleString() + ')');
 
-      // exit ribbon + node, branching off between the enter and retain columns
+      if (prev) flows += ribbon(prev.x + nodeW, topY, node.h, node.x, topY, node.h, prev.color);
+
       if (step.leaf.bookings > 0) {
         const exitH = Math.max(step.leaf.bookings * scale, 4);
         const exitRate = pct(step.leaf.bookings, step.survivorsIn);
-        flows += ribbon(prev.x + nodeW, topY + retained.h, exitH, colX[retainCol], exitY, exitH, RED);
-        nodes += '<rect class="sankey-node-rect" x="' + colX[retainCol] + '" y="' + exitY + '" width="' + nodeW + '" height="' + exitH + '" fill="' + RED + '"></rect>' +
-          '<text class="sankey-node-label" x="' + (colX[retainCol] + nodeW + 6) + '" y="' + (exitY + exitH / 2 - 4) + '" text-anchor="start">Exit</text>' +
-          '<text class="sankey-node-sub" x="' + (colX[retainCol] + nodeW + 6) + '" y="' + (exitY + exitH / 2 + 10) + '" text-anchor="start">' + exitRate.toFixed(0) + '% (' + step.leaf.bookings.toLocaleString() + ')</text>';
+        flows += ribbon(node.x + nodeW, topY + node.h - exitH, exitH, node.x, exitY, exitH, RED);
+        nodes += '<rect class="sankey-node-rect" x="' + node.x + '" y="' + exitY + '" width="' + nodeW + '" height="' + exitH + '" fill="' + RED + '"></rect>' +
+          '<text class="sankey-node-label" x="' + (node.x + nodeW + 6) + '" y="' + (exitY + exitH / 2 - 4) + '" text-anchor="start">Exit</text>' +
+          '<text class="sankey-node-sub" x="' + (node.x + nodeW + 6) + '" y="' + (exitY + exitH / 2 + 10) + '" text-anchor="start">' + exitRate.toFixed(0) + '% (' + step.leaf.bookings.toLocaleString() + ')</text>';
       }
-      flows += ribbon(prev.x + nodeW, topY, retained.h, colX[retainCol], topY, retained.h, GREEN);
 
-      stageLabels += '<text class="sankey-stage-label" x="' + ((colX[enterCol] + colX[retainCol]) / 2 + nodeW / 2) + '" y="' + bottomLabelY + '" text-anchor="middle">' + STAGE_LABEL[step.key] + '</text>';
+      stageLabels += '<text class="sankey-stage-label" x="' + (node.x + nodeW / 2) + '" y="' + bottomLabelY + '" text-anchor="middle">' + STAGE_LABEL[step.key] + '</text>';
 
-      prev = retained;
-      // flat hop into the next stage's entry column (no volume change, just relabeling)
-      if (i < steps.length - 1) {
-        const nextEnterCol = (i + 1) * 2;
-        const nextEntry = greenNode(nextEnterCol, step.survivorsOut, STAGE_LABEL[stages[i + 1]], pct(step.survivorsOut, baseBookings).toFixed(0) + '% (' + step.survivorsOut.toLocaleString() + ')');
-        flows += ribbon(prev.x + nodeW, topY, prev.h, nextEntry.x, topY, nextEntry.h, GREEN);
-        prev = nextEntry;
-      }
+      node.color = step.color;
+      prev = node;
     });
 
+    const contentH = bottomLabelY + 20;
+    const svgH = Math.round(contentH * 1.1);
     const svg =
-      '<svg width="100%" height="' + (bottomLabelY + 20) + '" viewBox="0 0 ' + W + ' ' + (bottomLabelY + 20) + '">' +
+      '<svg width="100%" height="' + svgH + '" viewBox="0 0 ' + W + ' ' + svgH + '">' +
       '<text class="sankey-title" x="' + (W / 2) + '" y="22" text-anchor="middle">Customer Journey</text>' +
       flows + nodes + stageLabels +
       '</svg>';
