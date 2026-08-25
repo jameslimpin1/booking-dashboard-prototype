@@ -143,6 +143,15 @@
   .stage-baseline { position: absolute; left: 0; right: 0; border-top: 2px dashed var(--baseline-axis); }
   .stage-baseline-label { position: absolute; right: 0; top: -16px; font-size: 10px; color: var(--text-muted); }
 
+  /* Sankey */
+  .sankey-wrap { position: relative; }
+  .sankey-node-label { font-size: 11px; fill: var(--text-primary); }
+  .sankey-node-sub { font-size: 10px; fill: var(--text-muted); }
+  .sankey-node-rect { cursor: default; }
+  .sankey-flow { cursor: pointer; opacity: 0.55; transition: opacity 0.12s; }
+  .sankey-flow:hover { opacity: 0.85; }
+  .sankey-col-label { font-size: 10px; fill: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
   /* Drilldown */
   .drill-layout { display: grid; grid-template-columns: 280px 1fr; gap: 20px; }
   @media (max-width: 760px) { .drill-layout { grid-template-columns: 1fr; } }
@@ -268,6 +277,17 @@
         Bar height = cancellation rate for that group; dashed line = baseline for the current filter.
       </p>
       <div class="stage-chart" id="stage-chart"></div>
+    </div>
+
+    <div class="card">
+      <h2>Where does volume actually go?</h2>
+      <p class="desc">
+        Same data as above, viewed as a flow: all bookings in the current filter,
+        split by whether/where a negative message first appeared, then split again
+        by outcome. Ribbon width = booking volume; the bar chart above is the rate
+        version of this same split.
+      </p>
+      <div class="sankey-wrap" id="sankey-chart"></div>
     </div>
 
     <div class="card">
@@ -494,6 +514,117 @@
     attachBarTooltips(el);
   }
 
+  function renderSankey() {
+    const filtered = journeyRows.filter(function (r) { return matches(r, filters); });
+    const totalsFiltered = totalsRows.filter(function (r) { return matches(r, filters); });
+    const el = document.getElementById('sankey-chart');
+
+    const baseBookings = totalsFiltered.reduce(function (s, r) { return s + r.bookings; }, 0);
+    const baseCancelled = totalsFiltered.reduce(function (s, r) { return s + r.cancelled_bookings; }, 0);
+    if (!baseBookings) { el.innerHTML = '<div class="empty-note">No data for this filter combination.</div>'; return; }
+
+    const stages = ['1_opening', '2_early_mid', '3_late_mid', '4_closing'];
+    const byStage = {};
+    stages.forEach(function (s) { byStage[s] = { bookings: 0, cancelled: 0 }; });
+    filtered.forEach(function (r) { byStage[r.stage].bookings += r.bookings; byStage[r.stage].cancelled += r.cancelled_bookings; });
+
+    const stageBookingsSum = stages.reduce(function (s, k) { return s + byStage[k].bookings; }, 0);
+    const stageCancelledSum = stages.reduce(function (s, k) { return s + byStage[k].cancelled; }, 0);
+    const noNegative = {
+      bookings: Math.max(0, baseBookings - stageBookingsSum),
+      cancelled: Math.max(0, baseCancelled - stageCancelledSum)
+    };
+
+    // middle nodes: no-negative bucket first, then the four stages
+    const midNodes = [{ key: 'none', label: 'No negative msg', color: 'var(--status-good)', d: noNegative }]
+      .concat(stages.map(function (s, i) { return { key: s, label: STAGE_LABEL[s], color: ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'][i], d: byStage[s] }; }));
+
+    const W = el.clientWidth || 860, H = 320;
+    const colX = [16, W / 2 - 60, W - 96];
+    const nodeW = 16;
+    const gap = 6;
+
+    function layout(nodes, x, totalH) {
+      const total = nodes.reduce(function (s, n) { return s + n.value; }, 0) || 1;
+      const usable = totalH - gap * (nodes.length - 1);
+      let y = 0;
+      return nodes.map(function (n) {
+        const h = Math.max(2, (n.value / total) * usable);
+        const node = { x: x, y: y, h: h, w: nodeW, node: n };
+        y += h + gap;
+        return node;
+      });
+    }
+
+    const leftNodes = layout([{ value: baseBookings, label: 'All bookings', color: 'var(--text-muted)' }], colX[0], H);
+    const midLayout = layout(midNodes.map(function (n) { return { value: n.d.bookings, label: n.label, color: n.color, key: n.key }; }), colX[1], H);
+    const rightNodes = layout([
+      { value: baseCancelled, label: 'Cancelled', color: 'var(--status-critical)' },
+      { value: baseBookings - baseCancelled, label: 'Completed', color: 'var(--status-good)' }
+    ], colX[2], H);
+
+    function ribbon(x1, y1, h1, x2, y2, h2, color) {
+      const mx = (x1 + x2) / 2;
+      const top = 'M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2;
+      const bot = 'L' + x2 + ',' + (y2 + h2) + ' C' + mx + ',' + (y2 + h2) + ' ' + mx + ',' + (y1 + h1) + ' ' + x1 + ',' + (y1 + h1) + ' Z';
+      return '<path class="sankey-flow" d="' + top + bot + '" fill="' + color + '"></path>';
+    }
+
+    let flows = '';
+    // all bookings -> mid nodes
+    const left = leftNodes[0];
+    let cursorY = left.y;
+    midLayout.forEach(function (m) {
+      if (m.h <= 2 && m.node.value === 0) return;
+      flows += ribbon(left.x + left.w, cursorY, m.h, m.x, m.y, m.h, m.node.color);
+      cursorY += m.h + gap;
+    });
+
+    // mid nodes -> outcome, split each node's flow by its own cancellation rate
+    const cancelledNode = rightNodes[0], completedNode = rightNodes[1];
+    let cancelledCursor = cancelledNode.y, completedCursor = completedNode.y;
+    midLayout.forEach(function (m) {
+      const src = midNodes.filter(function (n) { return n.key === m.node.key; })[0];
+      if (!src.d.bookings) return;
+      const total = src.d.bookings, cancelled = src.d.cancelled, completed = total - cancelled;
+      const total_h = m.h;
+      const cancelled_h = total_h * (cancelled / total);
+      const completed_h = total_h - cancelled_h;
+      if (cancelled_h > 0) {
+        flows += ribbon(m.x + m.w, m.y, cancelled_h, cancelledNode.x, cancelledCursor, cancelled_h, 'var(--status-critical)');
+        cancelledCursor += cancelled_h;
+      }
+      if (completed_h > 0) {
+        flows += ribbon(m.x + m.w, m.y + cancelled_h, completed_h, completedNode.x, completedCursor, completed_h, 'var(--status-good)');
+        completedCursor += completed_h;
+      }
+    });
+
+    function nodeRects(nodes, side) {
+      return nodes.map(function (n) {
+        const labelX = side === 'left' ? n.x - 8 : n.x + n.w + 8;
+        const anchor = side === 'left' ? 'end' : 'start';
+        const rate = n.node.d ? pct(n.node.d.cancelled, n.node.d.bookings) : null;
+        const sub = rate !== null ? n.node.value.toLocaleString() + ' · ' + rate.toFixed(1) + '% cxl' : n.node.value.toLocaleString();
+        return '<rect class="sankey-node-rect" x="' + n.x + '" y="' + n.y + '" width="' + n.w + '" height="' + n.h + '" fill="' + n.node.color + '"></rect>' +
+          '<text class="sankey-node-label" x="' + labelX + '" y="' + (n.y + n.h / 2 - 4) + '" text-anchor="' + anchor + '">' + n.node.label + '</text>' +
+          '<text class="sankey-node-sub" x="' + labelX + '" y="' + (n.y + n.h / 2 + 9) + '" text-anchor="' + anchor + '">' + sub + '</text>';
+      }).join('');
+    }
+
+    const svg =
+      '<svg width="100%" height="' + (H + 20) + '" viewBox="0 -20 ' + W + ' ' + (H + 20) + '">' +
+      '<text class="sankey-col-label" x="' + colX[0] + '" y="-6">Start</text>' +
+      '<text class="sankey-col-label" x="' + colX[1] + '" y="-6">First negative msg</text>' +
+      '<text class="sankey-col-label" x="' + colX[2] + '" y="-6">Outcome</text>' +
+      flows +
+      nodeRects(leftNodes, 'right') +
+      nodeRects(midLayout, 'right') +
+      nodeRects(rightNodes, 'left') +
+      '</svg>';
+    el.innerHTML = svg;
+  }
+
   function updateFilterSummary() {
     const parts = [];
     parts.push(filters.month === 'all' ? 'all 12 months' : filters.month);
@@ -506,6 +637,7 @@
     updateFilterSummary();
     renderComplaintsAndQuestions();
     renderStageChart();
+    renderSankey();
     renderConvList();
   }
 
