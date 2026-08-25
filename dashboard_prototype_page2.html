@@ -151,6 +151,8 @@
   .sankey-flow { cursor: pointer; opacity: 0.55; transition: opacity 0.12s; }
   .sankey-flow:hover { opacity: 0.85; }
   .sankey-col-label { font-size: 10px; fill: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .sankey-title { font-size: 15px; font-weight: 700; fill: var(--text-primary); }
+  .sankey-stage-label { font-size: 11px; font-weight: 600; fill: var(--text-secondary); }
 
   /* Drilldown */
   .drill-layout { display: grid; grid-template-columns: 280px 1fr; gap: 20px; }
@@ -282,10 +284,10 @@
     <div class="card">
       <h2>Where in the journey do bookings first go negative?</h2>
       <p class="desc">
-        All bookings, walked through the journey stage by stage. At each stage, the
-        grey stream is bookings still clean of any negative message; a colored
-        branch peels off for the bookings whose <em>first</em> negative message
-        landed at that stage. What's left at the end never had one.
+        All bookings, walked through the journey stage by stage. Green = still clean
+        of any negative message; red = bookings whose <em>first</em> negative message
+        landed at that stage, sized by both % and count. What's left at the far right
+        never had one.
       </p>
       <div class="sankey-wrap" id="sankey-chart"></div>
     </div>
@@ -541,17 +543,20 @@
     });
     const neverNegative = remaining;
 
-    const W = el.clientWidth || 860, H = 260;
-    const nCols = steps.length + 1;
-    const marginX = 90;
-    const colStep = (W - marginX * 2) / steps.length;
+    // Lay out as 8 columns, alternating "entering this stage" / "retained after
+    // this stage's exit" for each of the 4 stages — same shape as a classic
+    // step-funnel sankey (cart -> enter -> billing -> enter -> ... -> done).
+    const nCols = steps.length * 2;
+    const W = el.clientWidth || 860;
+    const marginX = 60;
+    const colStep = (W - marginX * 2) / (nCols - 1);
     const colX = []; for (let i = 0; i < nCols; i++) colX.push(marginX + i * colStep);
-    const nodeW = 14;
-    const trackTop = 10, trackH = 130;
-    const leafTop = trackTop + trackH + 46, leafMaxH = 60;
+    const nodeW = 16;
+    const titleH = 34, trackTop = titleH + 34, trackH = 150;
+    const exitY = trackTop + trackH + 40;
+    const bottomLabelY = exitY + 34;
     const scale = trackH / baseBookings;
-
-    function survivorY(v) { return trackTop + (trackH - v * scale); }
+    const topY = trackTop;
 
     function ribbon(x1, y1, h1, x2, y2, h2, color) {
       const mx = (x1 + x2) / 2;
@@ -560,44 +565,52 @@
       return '<path class="sankey-flow" d="' + top + bot + '" fill="' + color + '"></path>';
     }
 
-    let flows = '', nodes = '';
-    let colLabels = '<text class="sankey-col-label" x="' + (colX[0] + nodeW / 2) + '" y="0" text-anchor="middle">Start</text>';
+    let flows = '', nodes = '', stageLabels = '';
+    const GREEN = 'var(--status-good)', RED = 'var(--status-critical)';
+
+    function greenNode(colI, value, label, sub) {
+      const x = colX[colI], h = Math.max(value * scale, 2);
+      nodes += '<rect class="sankey-node-rect" x="' + x + '" y="' + topY + '" width="' + nodeW + '" height="' + h + '" fill="' + GREEN + '"></rect>' +
+        '<text class="sankey-node-label" x="' + (x + nodeW / 2) + '" y="' + (topY - 20) + '" text-anchor="middle">' + label + '</text>' +
+        '<text class="sankey-node-sub" x="' + (x + nodeW / 2) + '" y="' + (topY - 8) + '" text-anchor="middle">' + sub + '</text>';
+      return { x: x, h: h };
+    }
+
+    // col 0: population entering the first stage
+    let prev = greenNode(0, baseBookings, STAGE_LABEL[stages[0]], pct(baseBookings, baseBookings).toFixed(0) + '% (' + baseBookings.toLocaleString() + ')');
+
     steps.forEach(function (step, i) {
-      colLabels += '<text class="sankey-col-label" x="' + (colX[i + 1] + nodeW / 2) + '" y="0" text-anchor="middle">' + step.label + '</text>';
-    });
+      const enterCol = i * 2, retainCol = i * 2 + 1;
+      const retainLabel = i < steps.length - 1 ? 'Retained' : 'Done (never negative)';
+      const retained = greenNode(retainCol, step.survivorsOut, retainLabel, pct(step.survivorsOut, baseBookings).toFixed(0) + '% (' + step.survivorsOut.toLocaleString() + ')');
 
-    // start node
-    const startH = baseBookings * scale;
-    const startY = survivorY(baseBookings);
-    nodes += '<rect class="sankey-node-rect" x="' + colX[0] + '" y="' + startY + '" width="' + nodeW + '" height="' + startH + '" fill="var(--text-muted)"></rect>' +
-      '<text class="sankey-node-label" x="' + colX[0] + '" y="' + (startY - 8) + '" text-anchor="start">All bookings</text>' +
-      '<text class="sankey-node-sub" x="' + colX[0] + '" y="' + (startY + startH + 14) + '" text-anchor="start">' + baseBookings.toLocaleString() + '</text>';
+      // exit ribbon + node, branching off between the enter and retain columns
+      if (step.leaf.bookings > 0) {
+        const exitH = Math.max(step.leaf.bookings * scale, 4);
+        const exitRate = pct(step.leaf.bookings, step.survivorsIn);
+        flows += ribbon(prev.x + nodeW, topY + retained.h, exitH, colX[retainCol], exitY, exitH, RED);
+        nodes += '<rect class="sankey-node-rect" x="' + colX[retainCol] + '" y="' + exitY + '" width="' + nodeW + '" height="' + exitH + '" fill="' + RED + '"></rect>' +
+          '<text class="sankey-node-label" x="' + (colX[retainCol] + nodeW + 6) + '" y="' + (exitY + exitH / 2 - 4) + '" text-anchor="start">Exit</text>' +
+          '<text class="sankey-node-sub" x="' + (colX[retainCol] + nodeW + 6) + '" y="' + (exitY + exitH / 2 + 10) + '" text-anchor="start">' + exitRate.toFixed(0) + '% (' + step.leaf.bookings.toLocaleString() + ')</text>';
+      }
+      flows += ribbon(prev.x + nodeW, topY, retained.h, colX[retainCol], topY, retained.h, GREEN);
 
-    steps.forEach(function (step, i) {
-      const x1 = colX[i], x2 = colX[i + 1];
-      const inH = step.survivorsIn * scale, outH = step.survivorsOut * scale, leafH = Math.max(step.leaf.bookings * scale, step.leaf.bookings > 0 ? 4 : 0);
-      const y1 = survivorY(step.survivorsIn), y2 = survivorY(step.survivorsOut);
-      const leafY = leafTop;
+      stageLabels += '<text class="sankey-stage-label" x="' + ((colX[enterCol] + colX[retainCol]) / 2 + nodeW / 2) + '" y="' + bottomLabelY + '" text-anchor="middle">' + STAGE_LABEL[step.key] + '</text>';
 
-      if (outH > 0) flows += ribbon(x1 + nodeW, y1, outH, x2, y2, outH, 'var(--text-muted)');
-      if (leafH > 0) flows += ribbon(x1 + nodeW, y1 + outH, leafH, x2, leafY, leafH, step.color);
-
-      const rate = pct(step.leaf.cancelled, step.leaf.bookings);
-      nodes += '<rect class="sankey-node-rect" x="' + x2 + '" y="' + leafY + '" width="' + nodeW + '" height="' + Math.max(leafH, 2) + '" fill="' + step.color + '"></rect>' +
-        '<text class="sankey-node-label" x="' + x2 + '" y="' + (leafY - 20) + '" text-anchor="start">First negative:</text>' +
-        '<text class="sankey-node-label" x="' + x2 + '" y="' + (leafY - 8) + '" text-anchor="start">' + step.label + '</text>' +
-        '<text class="sankey-node-sub" x="' + x2 + '" y="' + (leafY + Math.max(leafH, 2) + 14) + '" text-anchor="start">' + step.leaf.bookings.toLocaleString() + ' · ' + rate.toFixed(1) + '% cxl</text>';
-
-      if (i === steps.length - 1) {
-        nodes += '<rect class="sankey-node-rect" x="' + x2 + '" y="' + y2 + '" width="' + nodeW + '" height="' + Math.max(outH, 2) + '" fill="var(--status-good)"></rect>' +
-          '<text class="sankey-node-label" x="' + x2 + '" y="' + (y2 - 8) + '" text-anchor="start">Never negative</text>' +
-          '<text class="sankey-node-sub" x="' + x2 + '" y="' + (y2 + Math.max(outH, 2) + 14) + '" text-anchor="start">' + neverNegative.toLocaleString() + '</text>';
+      prev = retained;
+      // flat hop into the next stage's entry column (no volume change, just relabeling)
+      if (i < steps.length - 1) {
+        const nextEnterCol = (i + 1) * 2;
+        const nextEntry = greenNode(nextEnterCol, step.survivorsOut, STAGE_LABEL[stages[i + 1]], pct(step.survivorsOut, baseBookings).toFixed(0) + '% (' + step.survivorsOut.toLocaleString() + ')');
+        flows += ribbon(prev.x + nodeW, topY, prev.h, nextEntry.x, topY, nextEntry.h, GREEN);
+        prev = nextEntry;
       }
     });
 
     const svg =
-      '<svg width="100%" height="' + (leafTop + leafMaxH + 40) + '" viewBox="0 -14 ' + W + ' ' + (leafTop + leafMaxH + 54) + '">' +
-      colLabels + flows + nodes +
+      '<svg width="100%" height="' + (bottomLabelY + 20) + '" viewBox="0 0 ' + W + ' ' + (bottomLabelY + 20) + '">' +
+      '<text class="sankey-title" x="' + (W / 2) + '" y="22" text-anchor="middle">Customer Journey</text>' +
+      flows + nodes + stageLabels +
       '</svg>';
     el.innerHTML = svg;
   }
