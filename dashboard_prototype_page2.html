@@ -280,12 +280,12 @@
     </div>
 
     <div class="card">
-      <h2>Where does volume actually go?</h2>
+      <h2>Where in the journey do bookings first go negative?</h2>
       <p class="desc">
-        Same data as above, viewed as a flow: all bookings in the current filter,
-        split by whether/where a negative message first appeared, then split again
-        by outcome. Ribbon width = booking volume; the bar chart above is the rate
-        version of this same split.
+        All bookings, walked through the journey stage by stage. At each stage, the
+        grey stream is bookings still clean of any negative message; a colored
+        branch peels off for the bookings whose <em>first</em> negative message
+        landed at that stage. What's left at the end never had one.
       </p>
       <div class="sankey-wrap" id="sankey-chart"></div>
     </div>
@@ -520,48 +520,38 @@
     const el = document.getElementById('sankey-chart');
 
     const baseBookings = totalsFiltered.reduce(function (s, r) { return s + r.bookings; }, 0);
-    const baseCancelled = totalsFiltered.reduce(function (s, r) { return s + r.cancelled_bookings; }, 0);
     if (!baseBookings) { el.innerHTML = '<div class="empty-note">No data for this filter combination.</div>'; return; }
 
     const stages = ['1_opening', '2_early_mid', '3_late_mid', '4_closing'];
+    const stageColor = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
     const byStage = {};
     stages.forEach(function (s) { byStage[s] = { bookings: 0, cancelled: 0 }; });
     filtered.forEach(function (r) { byStage[r.stage].bookings += r.bookings; byStage[r.stage].cancelled += r.cancelled_bookings; });
 
-    const stageBookingsSum = stages.reduce(function (s, k) { return s + byStage[k].bookings; }, 0);
-    const stageCancelledSum = stages.reduce(function (s, k) { return s + byStage[k].cancelled; }, 0);
-    const noNegative = {
-      bookings: Math.max(0, baseBookings - stageBookingsSum),
-      cancelled: Math.max(0, baseCancelled - stageCancelledSum)
-    };
+    // A booking's "stage" is where its FIRST negative message appeared, so it passed
+    // cleanly through every earlier stage. That lets us walk the population through
+    // the stages in order: at each stage some bookings peel off (first negative here),
+    // the rest continue clean into the next stage.
+    let remaining = baseBookings;
+    const steps = stages.map(function (s, i) {
+      const leaf = byStage[s];
+      const survivorsIn = remaining;
+      remaining = Math.max(0, remaining - leaf.bookings);
+      return { key: s, label: STAGE_LABEL[s], color: stageColor[i], survivorsIn: survivorsIn, leaf: leaf, survivorsOut: remaining };
+    });
+    const neverNegative = remaining;
 
-    // middle nodes: no-negative bucket first, then the four stages
-    const midNodes = [{ key: 'none', label: 'No negative msg', color: 'var(--status-good)', d: noNegative }]
-      .concat(stages.map(function (s, i) { return { key: s, label: STAGE_LABEL[s], color: ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'][i], d: byStage[s] }; }));
+    const W = el.clientWidth || 860, H = 260;
+    const nCols = steps.length + 1;
+    const marginX = 90;
+    const colStep = (W - marginX * 2) / steps.length;
+    const colX = []; for (let i = 0; i < nCols; i++) colX.push(marginX + i * colStep);
+    const nodeW = 14;
+    const trackTop = 10, trackH = 130;
+    const leafTop = trackTop + trackH + 46, leafMaxH = 60;
+    const scale = trackH / baseBookings;
 
-    const W = el.clientWidth || 860, H = 320;
-    const colX = [16, W / 2 - 60, W - 96];
-    const nodeW = 16;
-    const gap = 6;
-
-    function layout(nodes, x, totalH) {
-      const total = nodes.reduce(function (s, n) { return s + n.value; }, 0) || 1;
-      const usable = totalH - gap * (nodes.length - 1);
-      let y = 0;
-      return nodes.map(function (n) {
-        const h = Math.max(2, (n.value / total) * usable);
-        const node = { x: x, y: y, h: h, w: nodeW, node: n };
-        y += h + gap;
-        return node;
-      });
-    }
-
-    const leftNodes = layout([{ value: baseBookings, label: 'All bookings', color: 'var(--text-muted)' }], colX[0], H);
-    const midLayout = layout(midNodes.map(function (n) { return { value: n.d.bookings, label: n.label, color: n.color, key: n.key }; }), colX[1], H);
-    const rightNodes = layout([
-      { value: baseCancelled, label: 'Cancelled', color: 'var(--status-critical)' },
-      { value: baseBookings - baseCancelled, label: 'Completed', color: 'var(--status-good)' }
-    ], colX[2], H);
+    function survivorY(v) { return trackTop + (trackH - v * scale); }
 
     function ribbon(x1, y1, h1, x2, y2, h2, color) {
       const mx = (x1 + x2) / 2;
@@ -570,57 +560,44 @@
       return '<path class="sankey-flow" d="' + top + bot + '" fill="' + color + '"></path>';
     }
 
-    let flows = '';
-    // all bookings -> mid nodes
-    const left = leftNodes[0];
-    let cursorY = left.y;
-    midLayout.forEach(function (m) {
-      if (m.h <= 2 && m.node.value === 0) return;
-      flows += ribbon(left.x + left.w, cursorY, m.h, m.x, m.y, m.h, m.node.color);
-      cursorY += m.h + gap;
+    let flows = '', nodes = '';
+    let colLabels = '<text class="sankey-col-label" x="' + (colX[0] + nodeW / 2) + '" y="0" text-anchor="middle">Start</text>';
+    steps.forEach(function (step, i) {
+      colLabels += '<text class="sankey-col-label" x="' + (colX[i + 1] + nodeW / 2) + '" y="0" text-anchor="middle">' + step.label + '</text>';
     });
 
-    // mid nodes -> outcome, split each node's flow by its own cancellation rate
-    const cancelledNode = rightNodes[0], completedNode = rightNodes[1];
-    let cancelledCursor = cancelledNode.y, completedCursor = completedNode.y;
-    midLayout.forEach(function (m) {
-      const src = midNodes.filter(function (n) { return n.key === m.node.key; })[0];
-      if (!src.d.bookings) return;
-      const total = src.d.bookings, cancelled = src.d.cancelled, completed = total - cancelled;
-      const total_h = m.h;
-      const cancelled_h = total_h * (cancelled / total);
-      const completed_h = total_h - cancelled_h;
-      if (cancelled_h > 0) {
-        flows += ribbon(m.x + m.w, m.y, cancelled_h, cancelledNode.x, cancelledCursor, cancelled_h, 'var(--status-critical)');
-        cancelledCursor += cancelled_h;
-      }
-      if (completed_h > 0) {
-        flows += ribbon(m.x + m.w, m.y + cancelled_h, completed_h, completedNode.x, completedCursor, completed_h, 'var(--status-good)');
-        completedCursor += completed_h;
+    // start node
+    const startH = baseBookings * scale;
+    const startY = survivorY(baseBookings);
+    nodes += '<rect class="sankey-node-rect" x="' + colX[0] + '" y="' + startY + '" width="' + nodeW + '" height="' + startH + '" fill="var(--text-muted)"></rect>' +
+      '<text class="sankey-node-label" x="' + colX[0] + '" y="' + (startY - 8) + '" text-anchor="start">All bookings</text>' +
+      '<text class="sankey-node-sub" x="' + colX[0] + '" y="' + (startY + startH + 14) + '" text-anchor="start">' + baseBookings.toLocaleString() + '</text>';
+
+    steps.forEach(function (step, i) {
+      const x1 = colX[i], x2 = colX[i + 1];
+      const inH = step.survivorsIn * scale, outH = step.survivorsOut * scale, leafH = Math.max(step.leaf.bookings * scale, step.leaf.bookings > 0 ? 4 : 0);
+      const y1 = survivorY(step.survivorsIn), y2 = survivorY(step.survivorsOut);
+      const leafY = leafTop;
+
+      if (outH > 0) flows += ribbon(x1 + nodeW, y1, outH, x2, y2, outH, 'var(--text-muted)');
+      if (leafH > 0) flows += ribbon(x1 + nodeW, y1 + outH, leafH, x2, leafY, leafH, step.color);
+
+      const rate = pct(step.leaf.cancelled, step.leaf.bookings);
+      nodes += '<rect class="sankey-node-rect" x="' + x2 + '" y="' + leafY + '" width="' + nodeW + '" height="' + Math.max(leafH, 2) + '" fill="' + step.color + '"></rect>' +
+        '<text class="sankey-node-label" x="' + x2 + '" y="' + (leafY - 20) + '" text-anchor="start">First negative:</text>' +
+        '<text class="sankey-node-label" x="' + x2 + '" y="' + (leafY - 8) + '" text-anchor="start">' + step.label + '</text>' +
+        '<text class="sankey-node-sub" x="' + x2 + '" y="' + (leafY + Math.max(leafH, 2) + 14) + '" text-anchor="start">' + step.leaf.bookings.toLocaleString() + ' · ' + rate.toFixed(1) + '% cxl</text>';
+
+      if (i === steps.length - 1) {
+        nodes += '<rect class="sankey-node-rect" x="' + x2 + '" y="' + y2 + '" width="' + nodeW + '" height="' + Math.max(outH, 2) + '" fill="var(--status-good)"></rect>' +
+          '<text class="sankey-node-label" x="' + x2 + '" y="' + (y2 - 8) + '" text-anchor="start">Never negative</text>' +
+          '<text class="sankey-node-sub" x="' + x2 + '" y="' + (y2 + Math.max(outH, 2) + 14) + '" text-anchor="start">' + neverNegative.toLocaleString() + '</text>';
       }
     });
-
-    function nodeRects(nodes, side) {
-      return nodes.map(function (n) {
-        const labelX = side === 'left' ? n.x - 8 : n.x + n.w + 8;
-        const anchor = side === 'left' ? 'end' : 'start';
-        const rate = n.node.d ? pct(n.node.d.cancelled, n.node.d.bookings) : null;
-        const sub = rate !== null ? n.node.value.toLocaleString() + ' · ' + rate.toFixed(1) + '% cxl' : n.node.value.toLocaleString();
-        return '<rect class="sankey-node-rect" x="' + n.x + '" y="' + n.y + '" width="' + n.w + '" height="' + n.h + '" fill="' + n.node.color + '"></rect>' +
-          '<text class="sankey-node-label" x="' + labelX + '" y="' + (n.y + n.h / 2 - 4) + '" text-anchor="' + anchor + '">' + n.node.label + '</text>' +
-          '<text class="sankey-node-sub" x="' + labelX + '" y="' + (n.y + n.h / 2 + 9) + '" text-anchor="' + anchor + '">' + sub + '</text>';
-      }).join('');
-    }
 
     const svg =
-      '<svg width="100%" height="' + (H + 20) + '" viewBox="0 -20 ' + W + ' ' + (H + 20) + '">' +
-      '<text class="sankey-col-label" x="' + colX[0] + '" y="-6">Start</text>' +
-      '<text class="sankey-col-label" x="' + colX[1] + '" y="-6">First negative msg</text>' +
-      '<text class="sankey-col-label" x="' + colX[2] + '" y="-6">Outcome</text>' +
-      flows +
-      nodeRects(leftNodes, 'right') +
-      nodeRects(midLayout, 'right') +
-      nodeRects(rightNodes, 'left') +
+      '<svg width="100%" height="' + (leafTop + leafMaxH + 40) + '" viewBox="0 -14 ' + W + ' ' + (leafTop + leafMaxH + 54) + '">' +
+      colLabels + flows + nodes +
       '</svg>';
     el.innerHTML = svg;
   }
