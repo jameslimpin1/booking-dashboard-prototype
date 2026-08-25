@@ -282,12 +282,12 @@
     </div>
 
     <div class="card">
-      <h2>Where in the journey do bookings first go negative?</h2>
+      <h2>Where in the journey do bookings go negative?</h2>
       <p class="desc">
-        All bookings, walked through the journey stage by stage. Green = still clean
-        of any negative message; red = bookings whose <em>first</em> negative message
-        landed at that stage, sized by both % and count. What's left at the far right
-        never had one.
+        Each column is the full booking population for the current filter; the red
+        branch shows the share that had a negative message at that stage. Stages
+        aren't mutually exclusive — the same booking can go negative at more than
+        one stage, so these don't need to add up to 100%.
       </p>
       <div class="sankey-wrap" id="sankey-chart"></div>
     </div>
@@ -530,20 +530,15 @@
     stages.forEach(function (s) { byStage[s] = { bookings: 0, cancelled: 0 }; });
     filtered.forEach(function (r) { byStage[r.stage].bookings += r.bookings; byStage[r.stage].cancelled += r.cancelled_bookings; });
 
-    // A booking's "stage" is where its FIRST negative message appeared, so it passed
-    // cleanly through every earlier stage. That lets us walk the population through
-    // the stages in order: at each stage some bookings peel off (first negative here),
-    // the rest continue clean into the next stage.
-    let remaining = baseBookings;
+    // Stage buckets overlap (a booking can go negative at more than one stage —
+    // summed across all filters the four buckets total more than all bookings),
+    // so this can't be a true sequential funnel. Each stage is shown independently:
+    // "of all bookings, X% went negative at this stage."
     const steps = stages.map(function (s, i) {
-      const leaf = byStage[s];
-      const survivorsIn = remaining;
-      remaining = Math.max(0, remaining - leaf.bookings);
-      return { key: s, label: STAGE_LABEL[s], color: stageColor[i], survivorsIn: survivorsIn, leaf: leaf, survivorsOut: remaining };
+      return { key: s, label: STAGE_LABEL[s], color: stageColor[i], base: baseBookings, leaf: byStage[s] };
     });
-    // 4 columns, one per stage: each node is the population entering that stage,
-    // colored by stage; a red branch peels off for the bookings whose first
-    // negative message landed there, the rest flows on into the next stage's node.
+    // 4 columns, one per stage: each node is the full booking population,
+    // colored by stage; a red branch shows the bookings that went negative there.
     const nCols = steps.length;
     const W = el.clientWidth || 860;
     const marginX = 70;
@@ -574,25 +569,19 @@
       return { x: x, h: h };
     }
 
-    let prev = null;
     steps.forEach(function (step, i) {
-      const node = stageNode(i, step.survivorsIn, step.color, STAGE_LABEL[step.key], pct(step.survivorsIn, baseBookings).toFixed(0) + '% (' + step.survivorsIn.toLocaleString() + ')');
-
-      if (prev) flows += ribbon(prev.x + nodeW, topY, node.h, node.x, topY, node.h, prev.color);
+      const node = stageNode(i, step.base, step.color, STAGE_LABEL[step.key], 'all bookings (' + step.base.toLocaleString() + ')');
 
       if (step.leaf.bookings > 0) {
         const exitH = Math.max(step.leaf.bookings * scale, 4);
-        const exitRate = pct(step.leaf.bookings, step.survivorsIn);
+        const exitRate = pct(step.leaf.bookings, step.base);
         flows += ribbon(node.x + nodeW, topY + node.h - exitH, exitH, node.x, exitY, exitH, RED);
         nodes += '<rect class="sankey-node-rect" x="' + node.x + '" y="' + exitY + '" width="' + nodeW + '" height="' + exitH + '" fill="' + RED + '"></rect>' +
-          '<text class="sankey-node-label" x="' + (node.x + nodeW + 6) + '" y="' + (exitY + exitH / 2 - 4) + '" text-anchor="start">Exit</text>' +
+          '<text class="sankey-node-label" x="' + (node.x + nodeW + 6) + '" y="' + (exitY + exitH / 2 - 4) + '" text-anchor="start">Went negative</text>' +
           '<text class="sankey-node-sub" x="' + (node.x + nodeW + 6) + '" y="' + (exitY + exitH / 2 + 10) + '" text-anchor="start">' + exitRate.toFixed(0) + '% (' + step.leaf.bookings.toLocaleString() + ')</text>';
       }
 
       stageLabels += '<text class="sankey-stage-label" x="' + (node.x + nodeW / 2) + '" y="' + bottomLabelY + '" text-anchor="middle">' + STAGE_LABEL[step.key] + '</text>';
-
-      node.color = step.color;
-      prev = node;
     });
 
     const contentH = bottomLabelY + 20;
